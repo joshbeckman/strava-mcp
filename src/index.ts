@@ -163,6 +163,20 @@ function unwrap(result: unknown): unknown {
   }
 }
 
+/**
+ * The MCP server reports rate limiting inside a successful JSON-RPC response,
+ * as a single non-JSON text block. Surface it as 429 so callers back off
+ * instead of recording an empty result.
+ */
+function failure(value: unknown): { status: number; message: string } | null {
+  const text =
+    value && typeof value === "object" && Object.keys(value).length === 1
+      ? (value as { text?: string }).text
+      : undefined;
+  if (typeof text !== "string") return null;
+  return { status: /rate limit/i.test(text) ? 429 : 502, message: text };
+}
+
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data, null, 2), {
     status,
@@ -198,9 +212,12 @@ export default {
           arguments?: unknown;
         };
         if (!tool) return json({ error: "tool required" }, 400);
-        return json(
-          unwrap(await mcp(env, "tools/call", { name: tool, arguments: args ?? {} })),
+        const value = unwrap(
+          await mcp(env, "tools/call", { name: tool, arguments: args ?? {} }),
         );
+        const bad = failure(value);
+        if (bad) return json({ error: bad.message }, bad.status);
+        return json(value);
       }
       // Convenience route for the site build: sets for one or more activities.
       if (url.pathname === "/strength") {
@@ -209,14 +226,15 @@ export default {
           .map((id) => id.trim())
           .filter(Boolean);
         if (!ids.length) return json({ error: "ids required" }, 400);
-        return json(
-          unwrap(
-            await mcp(env, "tools/call", {
-              name: "get_strength_workout_details",
-              arguments: { activity_ids: ids },
-            }),
-          ),
+        const value = unwrap(
+          await mcp(env, "tools/call", {
+            name: "get_strength_workout_details",
+            arguments: { activity_ids: ids },
+          }),
         );
+        const bad = failure(value);
+        if (bad) return json({ error: bad.message }, bad.status);
+        return json(value);
       }
       return new Response("not found", { status: 404 });
     } catch (err) {
